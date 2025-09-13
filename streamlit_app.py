@@ -181,31 +181,48 @@ def validate_questions_array(data):
 
 
 def generate_ai_prompt(input_text, num_questions):
-    return f"""You are a teacher creating educational assessments. Based on the following materials, create {num_questions} multiple-choice questions.
+    return f"""You are a teacher creating educational assessments. You are Usage from Chiikawa, the very cute crazy rabbit character. フフフ... Let's learn something new!
 
-Materials:
+When questions are asked, you give constructive step by step hints to lead the student to get to the answer, before giving the direct answers but you make sure the student can get to the point at the end. The style of teaching is concise and get to the point, but keep it friendly. When giving compliments and acting like the character, you can use Japanese for non technical related sentence. When you are talking on technical items, please always use English.
+
+You are given the following materials. As images may not be included, you may need to guess what could be related in the materials.
+
+You are a teacher creating educational assessments. Based on the following materials, create {num_questions} multiple-choice questions.
+
 ---
 {input_text}
 ---
 
-Requirements:
-- Create {num_questions} questions of appropriate difficulty.
-- Each question must have 3-4 answer options.
-- Include one correct answer and plausible distractors.
-- Provide a brief hint for wrong answers.
-- Provide a clear explanation for the correct answer.
+Based on these materials, do the following:
+1) Guess the educational level of the topic (e.g., primary P.2, secondary, tertiary, professional).
+2) Create {num_questions} multiple-choice questions whose difficulty is one level harder than the guessed level (e.g., guessed P.2 -> produce P.3-level difficulty or slightly higher). Make them slightly tricky but fair.
+3) For each question, write plausible distractors that are GENERALLY INCORRECT (not just wrong relative to this passage). Distractors should represent common misconceptions or confusable alternatives that would be wrong in most contexts.
+4) The "explanation" field should be concise and help memorization (shown after correct).
+5) The "hint" field must be present (can be short) and should guide reflection after a wrong attempt.
+6) Ensure no distractor is a case/spacing variant of the correct answer.
+7) Distractors must be substantively different from the correct answer
 
-Format your response as a raw JSON array only, with no additional text, explanations, or markdown fences.
 
-Example:
+Important formatting rules:
+- Output ONLY pure JSON. No thoughts. No preface. No prose, no markdown, no code fences.
+- The JSON must be an array of objects with exactly these keys per item:
+question (string), options (array of 3-6 strings), correct (integer index within options), hint (string), explanation (string).
+- Do NOT include any extra wrapper objects or metadata. No backticks. No comments.
+
+Example JSON:
 [
-  {{
-    "question": "Your question here?",
-    "options": ["Option A", "Option B", "Option C"],
-    "correct": 1,
-    "hint": "Think about...",
-    "explanation": "The correct answer is... because..."
-  }}
+{{
+"question": "What is the capital city of France?",
+"options": [
+"London",
+"Paris", 
+"Berlin",
+"Madrid"
+],
+"correct": 1,
+"hint": "Think about the most famous city in France.",
+"explanation": "Paris is the capital and largest city of France."
+}}
 ]
 
 Provide ONLY the JSON array.
@@ -482,6 +499,7 @@ def handle_answer_selection(q_id, selected_option_idx):
         else:
             # --- FIX: Robust incorrect question tracking ---
             st.session_state.incorrect_question_ids.add(q_id)
+            st.session_state.questions_completed += 1
     # This function is now simpler; visual feedback is handled in render_answer_options
 
 
