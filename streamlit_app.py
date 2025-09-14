@@ -23,7 +23,7 @@ class PoeAPIClient:
         self.api_key = api_key
         self.base_url = "https://api.poe.com/v1"
 
-    def generate_questions(self, prompt, model="GPT-5-mini"):
+    def generate_questions(self, prompt, model="Gemini-2.5-Flash"):
         """Generate questions using Poe API"""
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -33,7 +33,7 @@ class PoeAPIClient:
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.7,
-            "max_tokens": 2000,
+            "max_tokens": 20000,
             "stream": False
         }
         try:
@@ -41,7 +41,7 @@ class PoeAPIClient:
                 f"{self.base_url}/chat/completions",
                 headers=headers,
                 json=data,
-                timeout=60
+                timeout=120
             )
             response.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
             result = response.json()
@@ -144,8 +144,108 @@ def stable_hash(text):
 
 
 def strip_markdown_fences(text):
-    return re.sub(r'```(json)?\n(.*?)\n```', r'\2', text, flags=re.DOTALL)
+    """
+    Extracts content from markdown code fences (```json ... ```) or
+    the largest apparent JSON array/object from a string.
+    Does NOT validate JSON completeness, just extracts the raw string.
+    """
+    # 1. Prioritize markdown code fences
+    match = re.search(r"```(?:json)?\s*\n(.*?)\n\s*```", text, flags=re.DOTALL)
+    if match:
+        return match.group(1).strip()
 
+    # 2. Fallback Strategy: Look for a bare JSON array or object
+    # We need to find the outermost array or object if no fences are present.
+    # This is trickier because the text might contain other prose.
+
+    best_json_candidate = None
+
+    # Try array first
+    start_bracket = text.find('[')
+    end_bracket = text.rfind(']')
+    if start_bracket != -1 and end_bracket > start_bracket:
+        candidate = text[start_bracket: end_bracket + 1]
+        # Heuristic: does it look like an array of objects?
+        if candidate.count('{') > 0 and candidate.count('}') > 0:
+            best_json_candidate = candidate
+
+    # Then try object (only if no good array candidate or if object is more prominent)
+    start_brace = text.find('{')
+    end_brace = text.rfind('}')
+    if start_brace != -1 and end_brace > start_brace:
+        candidate = text[start_brace: end_brace + 1]
+        # If we have an array candidate, and this object is not the *entire* content,
+        # we stick with the array. This is a heuristic.
+        if best_json_candidate is None or (
+                len(candidate) > len(best_json_candidate) and not best_json_candidate.startswith('[')):
+            best_json_candidate = candidate
+
+    return best_json_candidate
+
+
+def parse_partial_json_array(json_string):
+    """
+    Attempts to parse a JSON string, potentially truncated, to extract as many
+    complete JSON objects from an array as possible.
+    Returns a list of parsed objects.
+    """
+    if not json_string:
+        return []
+
+    json_string = json_string.strip()
+
+    # If it's a complete, valid JSON array, parse it directly
+    try:
+        data = json.loads(json_string)
+        if isinstance(data, list):
+            return data
+    except json.JSONDecodeError:
+        pass  # It's partial or malformed, proceed to recovery logic
+
+    # If it doesn't start with an array, it's not what we expect for questions.
+    # Or if it's a single object, we can try to wrap it, but for a list of questions,
+    # we primarily expect an array.
+    if not json_string.startswith('['):
+        return []
+
+    recovered_objects = []
+    balance = 0
+    in_string = False
+    escape_char = False
+    start_obj_index = -1
+
+    # Iterate through the string to find complete top-level objects within the array
+    # We need to handle nested structures and strings correctly to avoid misinterpreting '}'
+    for i, char in enumerate(json_string):
+        if in_string:
+            if char == '\\':
+                escape_char = not escape_char
+            elif char == '"' and not escape_char:
+                in_string = False
+            else:
+                escape_char = False
+        elif char == '"':
+            in_string = True
+            escape_char = False
+        elif char == '{':
+            if balance == 0:  # Start of a new top-level object in the array
+                start_obj_index = i
+            balance += 1
+        elif char == '}':
+            balance -= 1
+            # If balance returns to 0 and we had a starting object index,
+            # it means we've found a complete top-level object.
+            if balance == 0 and start_obj_index != -1:
+                try:
+                    obj_str = json_string[start_obj_index: i + 1]
+                    obj = json.loads(obj_str)
+                    recovered_objects.append(obj)
+                    start_obj_index = -1  # Reset for the next object
+                except json.JSONDecodeError:
+                    # This specific object might be malformed despite balanced braces,
+                    # or the truncation happened within it. We skip it.
+                    pass
+    return recovered_objects
 
 def is_valid_json_input(text):
     try:
@@ -257,28 +357,33 @@ def generate_questions_with_ai(input_text, num_questions, model):
             st.error("No response received from AI.")
             return None
 
-        # --- FIX: Robust JSON extraction ---
-        cleaned_response = strip_markdown_fences(response.strip())
-        # Find the first '[' and the last ']' to extract the JSON array
-        json_match = re.search(r'\[.*\]', cleaned_response, re.DOTALL)
-        if not json_match:
-            st.error("AI response did not contain a valid JSON array.")
+        # --- FIX: Robust JSON extraction and partial parsing ---
+        cleaned_response_str = strip_markdown_fences(response.strip())
+
+        if cleaned_response_str is None:
+            st.error("AI response did not contain a recognizable JSON structure.")
             with st.expander("Raw AI Response"): st.text(response)
             return None
 
-        json_string = json_match.group(0)
-        try:
-            questions = json.loads(json_string)
-            validation = validate_questions_array(questions)
-            if validation['valid']:
-                return questions
-            else:
-                st.error(f"Generated questions validation failed: {validation['error']}")
-                return None
-        except json.JSONDecodeError as e:
-            st.error(f"Failed to parse AI response as JSON: {e}")
-            with st.expander("Raw AI Response"):
-                st.text(json_string)
+        # Use the new function to parse potentially partial JSON
+        questions = parse_partial_json_array(cleaned_response_str)
+
+        if not questions:
+            st.error("Failed to parse any complete questions from AI response.")
+            with st.expander("Cleaned AI Response (potentially partial)"):
+                st.text(cleaned_response_str)
+            return None
+
+        validation = validate_questions_array(questions)
+        if validation['valid']:
+            # If the number of parsed questions is less than requested, inform the user.
+            if len(questions) < num_questions:
+                st.warning(f"💡 Only {len(questions)} out of {num_questions} questions were successfully generated and parsed due to an incomplete AI response. Consider reducing the requested number of questions.")
+            return questions
+        else:
+            st.error(f"Generated questions validation failed for parsed questions: {validation['error']}")
+            with st.expander("Parsed (but invalid) Questions"):
+                st.json(questions) # Show the partially parsed questions for debugging
             return None
 
 
@@ -319,6 +424,7 @@ def generate_audio_for_questions():
 
 def start_quiz():
     input_text = st.session_state.get('question_input', '').strip()
+    print("input_text")
     if not input_text:
         st.error("Please paste some material or a question set to begin.")
         return
@@ -326,15 +432,17 @@ def start_quiz():
     questions = None
     try:
         # Try to parse as JSON first
-        parsed = json.loads(strip_markdown_fences(input_text))
-        validation = validate_questions_array(parsed)
-        if validation['valid']:
-            questions = parsed
-        else:
-            # If it's not valid JSON, but was intended as such, show error
-            if input_text.strip().startswith('['):
-                st.error(f"JSON format error: {validation['error']}")
-                return
+        stripped_input = strip_markdown_fences(input_text)
+        if stripped_input is not None:
+            parsed = json.loads(stripped_input)
+            validation = validate_questions_array(parsed)
+            if validation['valid']:
+                questions = parsed
+            else:
+                # If it's not valid JSON, but was intended as such, show error
+                if input_text.strip().startswith('['):
+                    st.error(f"JSON format error: {validation['error']}")
+                    return
     except json.JSONDecodeError:
         pass  # Not JSON, will proceed to AI generation
 
@@ -686,7 +794,11 @@ def main():
         # if show_ai_panel:
         with st.expander("🤖 AI Generation Settings", expanded=False):
             c1, c2 = st.columns(2)
-            c1.selectbox("AI Model:", ["GPT-5-mini", "GPT-5", "Gemini-2.5-Pro"], key="llm_model")
+            c1.selectbox("AI Model:", ["Gemini-2.5-Flash",
+                                       # "Gemini-2.5-Pro",
+                                       # "GPT-5",
+                                       "GPT-5-mini"],
+                         key="llm_model")
             c2.number_input("Number of Questions:", min_value=1, max_value=20, value=3, key="num_questions")
 
         st.session_state.quiz_mode = 'Silent Mode'
