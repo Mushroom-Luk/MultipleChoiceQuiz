@@ -7,6 +7,7 @@ import re
 import time
 import requests
 from datetime import datetime
+from contextlib import contextmanager
 
 # Configure page
 st.set_page_config(
@@ -90,6 +91,70 @@ class PoeAPIClient:
         except requests.exceptions.RequestException as e:
             st.error(f"TTS Generation failed: {e}")
             return None
+
+
+# --- Improved Horizontal Layout CSS and Context Manager ---
+# --- Improved Horizontal Layout CSS and Context Manager ---
+# --- Improved Horizontal Layout CSS and Context Manager ---
+# --- Improved Horizontal Layout CSS and Context Manager ---
+HORIZONTAL_STYLE = """
+<style class="hide-element">
+    /* Hides the style container itself */
+    .element-container:has(.hide-element) {
+        display: none;
+    }
+    /* 
+        This is the main selector. It finds a div that has a direct child 
+        with class 'horizontal-marker' and applies flexbox styling to it.
+    */
+    div[data-testid="stVerticalBlock"]:has(> .element-container .horizontal-marker) {
+        display: flex;
+        flex-direction: row !important;
+        align-items: flex-start;
+        width: 100%;
+        gap: 1rem;
+    }
+    /* 
+        Overrides the default fixed width of Streamlit's container elements 
+        within our horizontal block to allow them to shrink-to-fit their content.
+    */
+    div[data-testid="stVerticalBlock"]:has(> .element-container .horizontal-marker) div {
+        width: max-content !important;
+    }
+    /* Make first and last elements take equal space to center the middle */
+    div[data-testid="stVerticalBlock"]:has(> .element-container .horizontal-marker) div:nth-child(2),
+    div[data-testid="stVerticalBlock"]:has(> .element-container .horizontal-marker) div:nth-child(4) {
+        flex: 1;
+    }
+    /* Center the middle element and align it to top */
+    div[data-testid="stVerticalBlock"]:has(> .element-container .horizontal-marker) div:nth-child(3) {
+        flex: 0 0 auto;
+        text-align: center;
+        margin-top: -5px;
+        padding-top: 0 !important;
+    }
+    /* Align last button to the right */
+    div[data-testid="stVerticalBlock"]:has(> .element-container .horizontal-marker) div:nth-child(4) {
+        display: flex;
+        justify-content: flex-end;
+    }
+</style>
+"""
+
+
+@contextmanager
+def st_horizontal():
+    """
+    A context manager to layout Streamlit elements horizontally with full width distribution.
+    It injects the necessary CSS and a marker span to activate the styling.
+    """
+    # Inject the CSS for horizontal layout.
+    st.markdown(HORIZONTAL_STYLE, unsafe_allow_html=True)
+    with st.container():
+        # Add a hidden marker element. The CSS selector uses this marker to identify
+        # the container that should have its children laid out horizontally.
+        st.markdown('<span class="hide-element horizontal-marker"></span>', unsafe_allow_html=True)
+        yield
 
 
 # Custom CSS
@@ -383,7 +448,7 @@ def generate_questions_with_ai(input_text, num_questions, model):
         else:
             st.error(f"Generated questions validation failed for parsed questions: {validation['error']}")
             with st.expander("Parsed (but invalid) Questions"):
-                st.json(questions) # Show the partially parsed questions for debugging
+                st.json(questions)  # Show the partially parsed questions for debugging
             return None
 
 
@@ -511,20 +576,26 @@ def render_quiz_question():
         unsafe_allow_html=True)
 
     # Navigation and question counter
-    c1, c2, c3 = st.columns([1, 2, 1])
-    if c1.button("← Back", disabled=idx == 0): go_back()
-    c2.markdown(f"<div style='text-align: center; font-weight: 600;'>Question {idx + 1} of {total_q}</div>",
-                unsafe_allow_html=True)
+    with st_horizontal():
+        # "Back" button
+        if st.button("← Back", disabled=idx == 0):
+            go_back()
 
-    # --- FIX: Next/Finish button logic ---
-    is_last_question = (idx == total_q - 1)
-    answered = question['id'] in st.session_state.user_answers
-    if is_last_question:
-        if c3.button("🏁 Finish Quiz", type="primary", disabled=not answered):
-            finish_quiz()
-    else:
-        if c3.button("Next →", disabled=not answered):
-            go_next()
+        # Question counter
+        st.markdown(
+            f"<div style='text-align: center; font-weight: 600; padding-top: 0.5rem;'>Question {idx + 1} of {total_q}</div>",
+            unsafe_allow_html=True)
+
+        # "Next" or "Finish" button logic
+        is_last_question = (idx == total_q - 1)
+        answered = question['id'] in st.session_state.user_answers
+
+        if is_last_question:
+            if st.button("🏁 Finish Quiz", type="primary", disabled=not answered):
+                finish_quiz()
+        else:
+            if st.button("Next →", disabled=not answered):
+                go_next()
 
     # Question and audio
     st.markdown(f"<div class='question-text'>{question['question']}</div>", unsafe_allow_html=True)
@@ -744,17 +815,19 @@ def render_revision_mode():
         st.session_state.revision_mode = False
         return
 
-    # --- FIX: Revision navigation logic ---
-    c1, c2, c3 = st.columns([1, 2, 1])
-    if c1.button("← Previous", disabled=idx == 0):
-        st.session_state.revision_index -= 1
-        st.rerun()
-    c2.markdown(
-        f"<div style='text-align: center; font-weight: 600;'>Reviewing {idx + 1} of {len(incorrect_q_ids)}</div>",
-        unsafe_allow_html=True)
-    if c3.button("Next →", disabled=idx >= len(incorrect_q_ids) - 1):
-        st.session_state.revision_index += 1
-        st.rerun()
+    # --- MODIFIED: Use st_horizontal for revision navigation with full width ---
+    with st_horizontal():
+        if st.button("← Previous", disabled=idx == 0):
+            st.session_state.revision_index -= 1
+            st.rerun()
+
+        st.markdown(
+            f"<div style='text-align: center; font-weight: 600; padding-top: 0.5rem;'>Reviewing {idx + 1} of {len(incorrect_q_ids)}</div>",
+            unsafe_allow_html=True)
+
+        if st.button("Next →", disabled=idx >= len(incorrect_q_ids) - 1):
+            st.session_state.revision_index += 1
+            st.rerun()
 
     st.markdown(f"<div class='question-text'>{question['question']}</div>", unsafe_allow_html=True)
     st.markdown("**Correct Answer:**")
