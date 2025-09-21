@@ -1,12 +1,10 @@
 <!-- This is an HTML comment, which is invisible in the final rendered Markdown. -->
 <!-- The line below uses a Level 1 Heading (#) and an emoji (:sparkles:) for the main title. -->
+
 # ✨ Knowledge Quest: The AI-Powered Quiz Generator
 
-<!-- This is a link to your app. Replace "#" with your actual Streamlit share URL. -->
-[[Streamlit App]](#)
-
-<!-- A short, bolded paragraph to grab attention. -->
-Welcome to **Knowledge Quest**, your personal AI companion for learning! This app transforms any text—your study notes, articles, or even book chapters—into a fun and interactive quiz. Supercharge your study sessions, test your knowledge, and make learning an exciting adventure!
+<!-- A more detailed paragraph for readers who are on the GitHub page. -->
+🧠 Supercharge your study sessions with Knowledge Quest! Paste your notes, articles, or documents, and our AI will instantly create a personalized quiz for you. Challenge yourself and master any topic. Ready to play? ✨
 
 <!-- Placeholder for an image. It's highly recommended to add a screenshot or GIF of your app in action. -->
 <!-- ![Knowledge Quest Demo](path/to/your/demo.gif) -->
