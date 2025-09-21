@@ -6,3 +6,4 @@ streamlit-local-storage
 PyMuPDF
 python-docx
 python-pptx
+Pyrebase4

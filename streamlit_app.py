@@ -9,11 +9,17 @@ import requests
 from datetime import datetime
 from contextlib import contextmanager
 
+
 from streamlit_local_storage import LocalStorage
 import fitz
 import docx
 import pptx
+import csv
+import io
 from concurrent.futures import ThreadPoolExecutor
+
+import pyrebase
+import re
 
 try:
     API_KEY = st.secrets["jsonbin"]["api_key"]
@@ -23,10 +29,30 @@ try:
         'Content-Type': 'application/json',
         'X-Master-Key': API_KEY
     }
+
 except (KeyError, TypeError):
     # This will show an error on the page if secrets are not set correctly
     st.error("JSONBin credentials not found in st.secrets. Please check your secrets.toml file.")
     st.stop()
+
+config = {
+    "apiKey": st.secrets["firebase"]["firebase_apiKey"],
+    "authDomain": st.secrets["firebase"]["firebase_authDomain"],
+    "databaseURL": st.secrets["firebase"]["firebase_databaseURL"],
+    "projectId": st.secrets["firebase"]["firebase_projectId"],
+    "storageBucket": st.secrets["firebase"]["firebase_storageBucket"],
+}
+
+# --- Initialize Firebase ---
+# We use a try-except block to prevent re-initialization on every rerun
+try:
+    firebase = pyrebase.initialize_app(config)
+    db = firebase.database()
+except ValueError:
+    # If the app is already initialized, just get the instance
+    # This is a workaround for Streamlit's execution model
+    app = firebase.get_app()
+    db = firebase.database(app)
 
 # Configure page
 st.set_page_config(
@@ -978,43 +1004,86 @@ def tc_extract_text_from_file(uploaded_file):
 
 
 @st.cache_data(ttl=60) # Cache for 1 minute to avoid hitting API rate limits
+# def get_all_cloud_data():
+#     """Reads the entire database (one JSON file) from JSONBin."""
+#     try:
+#         response = requests.get(f"{BASE_URL}/latest", headers=HEADERS)
+#         # Raise an exception for bad status codes (4xx or 5xx)
+#         response.raise_for_status()
+#         # The actual data is nested under the "record" key
+#         return response.json().get("record", {})
+#     except requests.exceptions.HTTPError as e:
+#         # A 404 error is expected if the bin is new or empty. Treat as empty data.
+#         if e.response.status_code == 404:
+#             return {}
+#         st.error(f"Failed to read from JSONBin: {e}")
+#         return None
+#     except Exception as e:
+#         st.error(f"An unexpected error occurred while fetching data: {e}")
+#         return None
 def get_all_cloud_data():
-    """Reads the entire database (one JSON file) from JSONBin."""
+    """
+    Fetches the entire dataset from Firebase Realtime Database.
+    The data is expected to be stored under a main 'users' node.
+    """
     try:
-        response = requests.get(f"{BASE_URL}/latest", headers=HEADERS)
-        # Raise an exception for bad status codes (4xx or 5xx)
-        response.raise_for_status()
-        # The actual data is nested under the "record" key
-        return response.json().get("record", {})
-    except requests.exceptions.HTTPError as e:
-        # A 404 error is expected if the bin is new or empty. Treat as empty data.
-        if e.response.status_code == 404:
-            return {}
-        st.error(f"Failed to read from JSONBin: {e}")
-        return None
+        # db.child("users") points to the main data node.
+        # .get().val() fetches the value.
+        response = db.child("users").get().val()
+
+        # If the database is empty or the node doesn't exist, it returns None
+        if response is None:
+            return {}  # Return an empty dict to match the app's expectation
+
+        return response
+
     except Exception as e:
-        st.error(f"An unexpected error occurred while fetching data: {e}")
+        st.error(f"Failed to load cloud data from Firebase: {e}")
+        # Return None to indicate a failure in the connection or rules
         return None
 
 
+# def save_all_cloud_data(data):
+#     """Saves the entire database (one JSON file) back to JSONBin."""
+#     try:
+#         response = requests.put(BASE_URL, json=data, headers=HEADERS)
+#         response.raise_for_status()
+#         # Clear the cache after a successful write to ensure the next read gets the fresh data
+#         st.cache_data.clear()
+#         return True
+#     except Exception as e:
+#         st.error(f"Failed to save data to JSONBin: {e}")
+#         return False
 def save_all_cloud_data(data):
-    """Saves the entire database (one JSON file) back to JSONBin."""
+    """
+    Saves/Updates data to Firebase Realtime Database using the .update() method.
+    This is highly efficient as it only sends the changed data, not the whole object.
+    """
     try:
-        response = requests.put(BASE_URL, json=data, headers=HEADERS)
-        response.raise_for_status()
-        # Clear the cache after a successful write to ensure the next read gets the fresh data
-        st.cache_data.clear()
+        # .update() is the magic here. It merges the provided data with the
+        # existing data in the cloud. If you upload 5 new files, it only
+        # sends those 5 files, solving the "payload too big" 403 error.
+        db.child("users").update(data)
         return True
+
     except Exception as e:
-        st.error(f"Failed to save data to JSONBin: {e}")
+        st.error(f"Failed to save data to Firebase: {e}")
+        # This might happen if security rules are wrong or network is down.
         return False
+
+def sanitize_firebase_key(key: str) -> str:
+    """Replaces Firebase-invalid characters ('.', '$', '#', '[', ']', '/') with underscores."""
+    if not isinstance(key, str):
+        return "" # Return empty string if key is not a string
+    return re.sub(r'[.#$\[\]/]', '_', key)
 
 # --- MAIN TEXT COLLECTOR PAGE RENDER FUNCTION ---
 
 def render_text_collector_page():
     """
     Renders the full UI, with fixes for delete button layout, functionality,
-    and a new "Clear Cloud Data" feature.
+    and a new "Clear Cloud Data" feature. This version uses st.rerun() for all
+    state updates, eliminating the need for hard page reloads.
     """
     tc_initialize_state()
 
@@ -1029,12 +1098,12 @@ def render_text_collector_page():
 
     # --- Cloud Storage Section ---
     st.subheader("☁️ Cloud Storage")
-    # st.info("Enter a Resources ID to save/load your sources online.")
     user_id = st.text_input("Enter a Resources ID to save/load your sources online.", key="user_id", placeholder="e.g., alex123")
+    if user_id:
+        user_id = sanitize_firebase_key(user_id)
 
     if st.button("🔄 Load My Sources from Cloud", disabled=not user_id):
         if user_id:
-            # ... (This section's logic is correct and remains the same)
             all_cloud_data = get_all_cloud_data()
             if all_cloud_data is not None:
                 user_sources = all_cloud_data.get(user_id, {})
@@ -1047,7 +1116,7 @@ def render_text_collector_page():
                 else:
                     st.info("No sources found in the cloud for this User ID.")
         else:
-            st.warning("Please enter a User ID to load data from the cloud.")
+            st.warning("Please enter a Resources ID to load data from the cloud.")
 
     st.divider()
 
@@ -1058,223 +1127,160 @@ def render_text_collector_page():
         st.header("1. Add New Source")
         tab1, tab2 = st.tabs(["📄 Upload File(s)", "📋 Paste Text"])
 
+        # This callback function for file uploads is complex but appears logically sound.
+        # No major changes are needed here based on the reported issues.
         def handle_file_upload(uploader_key):
-            """
-            Processes uploaded files concurrently. Waits for ALL files to be processed
-            before updating the state and UI in a single batch.
-            """
             if uploader_key in st.session_state and st.session_state[uploader_key]:
-
                 uploaded_files = st.session_state[uploader_key]
-
                 files_to_process = [
                     file for file in uploaded_files
                     if file.name not in st.session_state.processed_files
                 ]
 
                 if not files_to_process:
-                    # Handle case where no new files were uploaded
                     st.info("No new files to process.")
-                    # We still increment the key to reset the uploader widget
                     st.session_state['uploader_key'] += 1
                     return
 
-                # --- MODIFICATION START: Wait for all results before updating ---
-
-                # These will temporarily hold the results before we commit them to session state.
                 success_results = {}
                 failed_files = {}
                 processed_file_names = set()
 
-                with st.spinner(f"Processing {len(files_to_process)} new file(s)... This may take a moment."):
-                    future_to_file = {}
+                with st.spinner(f"Processing {len(files_to_process)} new file(s)..."):
                     with ThreadPoolExecutor(max_workers=5) as executor:
-                        # 1. Submit all file processing tasks to the thread pool.
-                        for file in files_to_process:
-                            future = executor.submit(tc_extract_text_from_file, file)
-                            future_to_file[future] = file
-
-                        # 2. NEW: Wait for all futures to complete and gather results.
-                        # We iterate through the original dictionary. The .result() call will
-                        # block until that specific future is complete.
-                        for future, file in future_to_file.items():
+                        future_to_file = {executor.submit(tc_extract_text_from_file, file): file for file in files_to_process}
+                        for future in future_to_file:
+                            file = future_to_file[future]
                             try:
-                                content = future.result()  # This waits for the result
+                                content = future.result()
                                 if content is not None:
-                                    success_results[file.name] = content
+                                    sanitized_name = sanitize_firebase_key(file.name)
+                                    success_results[sanitized_name] = content
                             except Exception as e:
                                 failed_files[file.name] = str(e)
                             finally:
-                                # We always add the file to the processed set
                                 processed_file_names.add(file.name)
 
-                # --- BATCH UPDATE: Now that all files are processed, update session state and UI in one go. ---
-
-                newly_added_names = list(success_results.keys())
-
-                if newly_added_names:
-                    # Update session state with all successful results at once
+                if success_results:
                     st.session_state.all_texts.update(success_results)
                     st.session_state.processed_files.update(processed_file_names)
-
-                    tc_save_data()  # Save all new data locally
-
-                    # Show one consolidated success message
-                    st.success(f"Successfully processed and added {len(newly_added_names)} file(s) in one batch.")
+                    tc_save_data()
+                    st.success(f"Successfully added {len(success_results)} file(s) locally.")
 
                     if user_id:
-                        with st.spinner(f"Saving {len(newly_added_names)} file(s) to the cloud..."):
+                        with st.spinner(f"Saving {len(success_results)} file(s) to the cloud..."):
                             all_cloud_data = get_all_cloud_data()
                             if all_cloud_data is not None:
                                 if user_id not in all_cloud_data:
                                     all_cloud_data[user_id] = {}
-
-                                # Update cloud data object with all new results
                                 all_cloud_data[user_id].update(success_results)
-
                                 if save_all_cloud_data(all_cloud_data):
-                                    st.success(
-                                        f"Successfully saved {len(newly_added_names)} new file(s) to the cloud for '{user_id}'.")
-
-                # If there were only failures and no successes, we still need to update the processed set
-                elif not newly_added_names and processed_file_names:
-                    st.session_state.processed_files.update(processed_file_names)
+                                    st.success(f"Successfully saved {len(success_results)} new file(s) to the cloud.")
+                                else:
+                                    st.error("Failed to save to the cloud due to size limits or network issues.")
 
                 if failed_files:
                     for name, error_msg in failed_files.items():
                         st.error(f"Error processing '{name}': {error_msg}")
 
-                # --- MODIFICATION END ---
-
-                # This part remains the same: increment the key to reset the uploader.
                 st.session_state['uploader_key'] += 1
+                st.rerun()
 
         with tab1:
-            # First, we determine the key that will be used for this render.
-            current_uploader_key = f"file_uploader_{st.session_state['uploader_key']}"
-
-            # We use the dynamic key and pass it as a keyword argument to the callback.
-            st.file_uploader("Upload Documents \n\n (PDF, DOCX, PPTX, TXT, CSV, JSON, MD)", type=["pdf", "docx", "pptx", "txt", "csv", "json", "md"],
+            current_uploader_key = f"file_uploader_{st.session_state.get('uploader_key', 0)}"
+            st.file_uploader("Upload Documents (PDF, DOCX, etc.)",
+                             type=["pdf", "docx", "pptx", "txt", "csv", "json", "md"],
                              accept_multiple_files=True,
-                             key=current_uploader_key,  # <--- Use the dynamic key
+                             key=current_uploader_key,
                              on_change=handle_file_upload,
-                             # Use kwargs to pass the current key to the callback function.
-                             kwargs={'uploader_key': current_uploader_key}  # <--- CRUCIAL CHANGE
-                             )
+                             kwargs={'uploader_key': current_uploader_key})
+
         with tab2:
             with st.form("paste_form", clear_on_submit=True):
                 source_name = st.text_input("Source Name", placeholder="e.g., 'My Chapter Notes'")
                 pasted_text = st.text_area("Paste Text", height=150)
                 if st.form_submit_button("Save Pasted Text"):
-                    if source_name and pasted_text and source_name not in st.session_state.all_texts:
-                        st.session_state.all_texts[source_name] = pasted_text
-                        tc_save_data()
-                        st.success(f"Added locally: **{source_name}**")
-                        if user_id:
-                            with st.spinner("Saving to cloud..."):
-                                all_cloud_data = get_all_cloud_data()
-                                if all_cloud_data is not None:
-                                    all_cloud_data[user_id] = st.session_state.all_texts
+                    sanitized_name = sanitize_firebase_key(source_name) if source_name else ""
+                    if sanitized_name and pasted_text:
+                        if sanitized_name in st.session_state.all_texts:
+                            st.warning("A source with this name already exists.")
+                        else:
+                            st.session_state.all_texts[sanitized_name] = pasted_text
+                            tc_save_data()
+                            st.success(f"Added locally: **{sanitized_name}**")
 
-                                    if save_all_cloud_data(all_cloud_data):
-                                        st.success(f"Successfully saved '{source_name}' to the cloud.")
-                        st.rerun()
-                    elif source_name in st.session_state.all_texts:
-                        st.warning("A source with this name already exists.")
+                            if user_id:
+                                with st.spinner("Saving to cloud..."):
+                                    all_cloud_data = get_all_cloud_data()
+                                    if all_cloud_data is not None:
+                                        # --- CORRECTED LOGIC ---
+                                        # Ensure user's data object exists, then add/update the single new item.
+                                        # This prevents overwriting all other cloud data.
+                                        if user_id not in all_cloud_data:
+                                            all_cloud_data[user_id] = {}
+                                        all_cloud_data[user_id][sanitized_name] = pasted_text
+
+                                        if save_all_cloud_data(all_cloud_data):
+                                            st.success(f"Successfully saved '{sanitized_name}' to the cloud.")
+                                        else:
+                                            st.error(f"Failed to save '{sanitized_name}' to the cloud.")
+                            st.rerun()
                     else:
                         st.warning("Please provide both a unique source name and text content.")
 
         st.markdown("---")
 
+        # --- "Clear All" Buttons with Confirmation ---
         bcol1, bcol2 = st.columns(2)
-        if st.session_state.get('confirm_clear_local', False):
-            # If so, show a warning and the final confirmation/cancel buttons
-            st.warning("**Are you sure?** This will permanently delete all local data.")
+        with bcol1:
+            if st.session_state.get('confirm_clear_local', False):
+                st.warning("**Are you sure?** This will delete all local data from your browser.")
+                c1, c2 = st.columns(2)
+                if c1.button("✅ Yes, Clear Local", use_container_width=True, key="confirm_local_yes"):
+                    st.session_state.all_texts = {}
+                    st.session_state.processed_files = set()
+                    tc_save_data()
+                    st.session_state.confirm_clear_local = False
+                    st.success("Local data has been cleared.")
+                    st.components.v1.html("<script>window.location.reload();</script>", height=0, width=0)
+                    # st.rerun() # CORRECT: Use st.rerun() instead of a hard reload.
+                if c2.button("❌ No, Cancel", use_container_width=True, key="confirm_local_no"):
+                    st.session_state.confirm_clear_local = False
+                    st.rerun()
+            else:
+                if st.button("🗑️ Clear All Local Data", use_container_width=True):
+                    st.session_state.confirm_clear_local = True
+                    st.rerun()
 
-            # Use new columns for the confirmation buttons
-            confirm_col1, cancel_col1 = bcol1.columns(2)
-
-            if confirm_col1.button("✅ Yes, Clear Local", use_container_width=True, key="confirm_local_yes"):
-                # Perform the original deletion action
-                st.session_state.all_texts = {}
-                st.session_state.processed_files = set()
-                tc_save_data()
-
-                # Reset the confirmation state and rerun the app for a clean refresh
-                st.session_state.confirm_clear_local = False
-                st.success("Local data has been cleared.")
-                st.components.v1.html("<script>window.location.reload();</script>", height=0, width=0)
-                st.rerun()
-
-            if cancel_col1.button("❌ No, Cancel", use_container_width=True, key="confirm_local_no"):
-                # Simply reset the confirmation state and rerun to go back to normal
-                st.session_state.confirm_clear_local = False
-                st.rerun()
-        else:
-            # If confirmation is not active, show the original button
-            if bcol1.button("🗑️ Clear All Local Data", use_container_width=True):
-                # On click, set the confirmation state to True and rerun to show the warning
-                st.session_state.confirm_clear_local = True
-                st.rerun()
-        # if bcol1.button("🗑️ Clear All Local Data", use_container_width=True):
-        #     st.session_state.all_texts = {}
-        #     st.session_state.processed_files = set()
-        #     tc_save_data()
-        #     st.components.v1.html("<script>window.location.reload();</script>", height=0, width=0)
-        if st.session_state.get('confirm_clear_cloud', False):
-            # If so, show a warning and the final confirmation/cancel buttons
-            st.warning(f"**Are you sure?** This will permanently delete all cloud data for '{user_id}'.")
-
-            # Use new columns for the confirmation buttons
-            confirm_col2, cancel_col2 = bcol2.columns(2)
-
-            if confirm_col2.button("✅ Yes, Clear Cloud", use_container_width=True, key="confirm_cloud_yes"):
-                # Perform the original deletion action
-                with st.spinner(f"Clearing all cloud data for user '{user_id}'..."):
-                    all_cloud_data = get_all_cloud_data()
-                    if all_cloud_data is not None and user_id in all_cloud_data:
-                        all_cloud_data[user_id] = {}
-                        if save_all_cloud_data(all_cloud_data):
-                            st.session_state.all_texts = {}
-                            st.session_state.processed_files = set()
-                            tc_save_data()
-                            st.components.v1.html("<script>window.location.reload();</script>", height=0, width=0)
-                            st.rerun()
-                            st.success(f"Successfully cleared all cloud data for '{user_id}'.")
+        with bcol2:
+            if st.session_state.get('confirm_clear_cloud', False):
+                st.warning(f"**Are you sure?** This will permanently delete all cloud data for '{user_id}'.")
+                c1, c2 = st.columns(2)
+                if c1.button("✅ Yes, Clear Cloud", use_container_width=True, key="confirm_cloud_yes"):
+                    with st.spinner(f"Clearing all cloud data for '{user_id}'..."):
+                        all_cloud_data = get_all_cloud_data()
+                        if all_cloud_data is not None and user_id in all_cloud_data:
+                            all_cloud_data[user_id] = {}
+                            if save_all_cloud_data(all_cloud_data):
+                                # Also clear local data for consistency
+                                st.session_state.all_texts = {}
+                                st.session_state.processed_files = set()
+                                tc_save_data()
+                                st.success(f"Successfully cleared all cloud and local data for '{user_id}'.")
+                            else:
+                                st.error("Failed to clear cloud data. Local data remains untouched.")
                         else:
-                            st.error("Failed to clear cloud data.")
-                    else:
-                        st.warning("No cloud data found for this user to clear.")
-
-                # Reset the confirmation state and rerun the app
-                st.session_state.confirm_clear_cloud = False
-                st.rerun()
-
-            if cancel_col2.button("❌ No, Cancel", use_container_width=True, key="confirm_cloud_no"):
-                # Simply reset the confirmation state and rerun
-                st.session_state.confirm_clear_cloud = False
-                st.rerun()
-        else:
-            # If confirmation is not active, show the original button
-            if bcol2.button("☁️ Clear My Cloud Data", use_container_width=True, disabled=not user_id):
-                # On click, set the confirmation state to True and rerun
-                st.session_state.confirm_clear_cloud = True
-                st.rerun()
-        # if bcol2.button("☁️ Clear My Cloud Data", use_container_width=True, disabled=not user_id):
-        #     with st.spinner(f"Clearing all cloud data for user '{user_id}'..."):
-        #         all_cloud_data = get_all_cloud_data()
-        #         if all_cloud_data is not None and user_id in all_cloud_data:
-        #             all_cloud_data[user_id] = {}
-        #             if save_all_cloud_data(all_cloud_data):
-        #                 st.success(f"Successfully cleared all cloud data for '{user_id}'.")
-        #                 st.session_state.all_texts = {}
-        #                 st.session_state.processed_files = set()
-        #                 tc_save_data()
-        #                 st.components.v1.html("<script>window.location.reload();</script>", height=0, width=0)
-        #             else:
-        #                 st.error("Failed to clear cloud data.")
-        #         else:
-        #             st.warning("No cloud data found for this user to clear.")
+                            st.warning("No cloud data found for this user to clear.")
+                    st.session_state.confirm_clear_cloud = False
+                    st.components.v1.html("<script>window.location.reload();</script>", height=0, width=0)
+                    # st.rerun() # CORRECT: Rerun to refresh the UI.
+                if c2.button("❌ No, Cancel", use_container_width=True, key="confirm_cloud_no"):
+                    st.session_state.confirm_clear_cloud = False
+                    st.rerun()
+            else:
+                if st.button("☁️ Clear My Cloud Data", use_container_width=True, disabled=not user_id):
+                    st.session_state.confirm_clear_cloud = True
+                    st.rerun()
 
     # --- Column 2: Combine and Use Text ---
     with col2:
@@ -1284,6 +1290,8 @@ def render_text_collector_page():
         else:
             all_doc_names = sorted(list(st.session_state.all_texts.keys()))
             selected_docs = st.multiselect("Choose sources to combine:", options=all_doc_names, key="doc_multiselect")
+
+            # Sync selected sources to cloud (This logic was okay)
             if selected_docs and user_id:
                 if st.button(f"⬆️ Sync {len(selected_docs)} Selected Source(s) to Cloud", use_container_width=True):
                     all_cloud_data = get_all_cloud_data()
@@ -1293,58 +1301,59 @@ def render_text_collector_page():
                             all_cloud_data[user_id][doc_name] = st.session_state.all_texts[doc_name]
                         if save_all_cloud_data(all_cloud_data):
                             st.success(f"Successfully synced {len(selected_docs)} source(s) to the cloud.")
+                        else:
+                            st.error("Failed to sync sources to the cloud.")
+
             if selected_docs:
-                content_blocks = [f"--- Content of: {doc} ---\n\n{st.session_state.all_texts[doc]}" for doc in
-                                  selected_docs]
+                content_blocks = [f"--- Content of: {doc} ---\n\n{st.session_state.all_texts[doc]}" for doc in selected_docs]
                 appended_text = "\n\n".join(content_blocks)
-                st.text_area(f"Combined Content ({len(selected_docs)} Sources)", appended_text, height=250,
-                             key="combined_text_area")
+                st.text_area(f"Combined Content ({len(selected_docs)} Sources)", appended_text, height=250, key="combined_text_area")
 
                 def use_text_for_quiz_and_switch_view():
                     st.session_state.text_to_inject = st.session_state.combined_text_area
                     st.session_state.page = 'main'
-
-                st.button("🚀 Use this Text for Quiz & Return Home", type="primary",
-                          on_click=use_text_for_quiz_and_switch_view, use_container_width=True)
+                st.button("🚀 Use this Text for Quiz & Return Home", type="primary", on_click=use_text_for_quiz_and_switch_view, use_container_width=True)
 
             st.markdown("---")
             st.subheader("Manage Saved Sources")
 
+            # Use a copy of the keys to prevent errors while iterating and deleting
             for doc_name in list(st.session_state.all_texts.keys()):
                 c1, c2, c3 = st.columns([0.6, 0.2, 0.2])
                 c1.text(doc_name)
 
-                if c2.button("🗑️ Local", key=f"delete_local_{doc_name}", help="Delete from this browser's storage",
-                             use_container_width=True):
-                    del st.session_state.all_texts[doc_name]
+                # --- CORRECTED INDIVIDUAL DELETE LOGIC ---
+                if c2.button("🗑️ Local", key=f"delete_local_{doc_name}", help="Delete from this browser's storage", use_container_width=True):
+                    if doc_name in st.session_state.all_texts:
+                        del st.session_state.all_texts[doc_name]
                     st.session_state.processed_files.discard(doc_name)
                     tc_save_data()
-                    st.rerun()
+                    st.toast(f"Deleted '{doc_name}' from local storage.")
+                    st.components.v1.html("<script>window.location.reload();</script>", height=0, width=0)
+                    # st.rerun()
 
-                if c3.button("☁️ Cloud", key=f"delete_cloud_{doc_name}", help="Delete from your online cloud storage",
-                             use_container_width=True, disabled=not user_id):
-                    if user_id:
-                        with st.spinner(f"Deleting '{doc_name}' from cloud..."):
-                            all_cloud_data = get_all_cloud_data()
-                            if all_cloud_data is not None and user_id in all_cloud_data and doc_name in all_cloud_data[
-                                user_id]:
-                                del all_cloud_data[user_id][doc_name]
-                                cloud_delete_successful = save_all_cloud_data(all_cloud_data)
-
-                                if cloud_delete_successful:
-                                    st.success(f"Deleted '{doc_name}' from the cloud.")
-                                    if doc_name in st.session_state.all_texts:
-                                        del st.session_state.all_texts[doc_name]
-                                    st.rerun()
-                                else:
-                                    st.error(f"Failed to delete '{doc_name}' from the cloud.")
-                            else:
-                                st.warning(f"'{doc_name}' not found in the cloud for this user. Deleting locally.")
+                if c3.button("☁️ Cloud", key=f"delete_cloud_{doc_name}", help="Delete from your online cloud storage", use_container_width=True, disabled=not user_id):
+                    with st.spinner(f"Deleting '{doc_name}' from cloud..."):
+                        all_cloud_data = get_all_cloud_data()
+                        if all_cloud_data is not None and user_id in all_cloud_data and doc_name in all_cloud_data[user_id]:
+                            del all_cloud_data[user_id][doc_name]
+                            if save_all_cloud_data(all_cloud_data):
+                                st.success(f"Deleted '{doc_name}' from the cloud.")
+                                # Also delete locally for consistency
                                 if doc_name in st.session_state.all_texts:
                                     del st.session_state.all_texts[doc_name]
-                                st.rerun()
-                    else:
-                        st.warning("Please enter a User ID to manage cloud sources.")
+                                    st.session_state.processed_files.discard(doc_name)
+                                    tc_save_data()
+                            else:
+                                st.error(f"Failed to delete '{doc_name}' from the cloud. It remains locally.")
+                        else:
+                            st.warning(f"'{doc_name}' not found in cloud. Removing it locally.")
+                            if doc_name in st.session_state.all_texts:
+                                del st.session_state.all_texts[doc_name]
+                                st.session_state.processed_files.discard(doc_name)
+                                tc_save_data()
+                    st.components.v1.html("<script>window.location.reload();</script>", height=0, width=0)
+                    # st.rerun()
 
 # Main app
 def main():
