@@ -9,14 +9,33 @@ import requests
 from datetime import datetime
 from contextlib import contextmanager
 
+from streamlit_local_storage import LocalStorage
+import fitz
+import docx
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+try:
+    API_KEY = st.secrets["jsonbin"]["api_key"]
+    BIN_ID = st.secrets["jsonbin"]["bin_id"]
+    BASE_URL = f"https://api.jsonbin.io/v3/b/{BIN_ID}"
+    HEADERS = {
+        'Content-Type': 'application/json',
+        'X-Master-Key': API_KEY
+    }
+except (KeyError, TypeError):
+    # This will show an error on the page if secrets are not set correctly
+    st.error("JSONBin credentials not found in st.secrets. Please check your secrets.toml file.")
+    st.stop()
+
 # Configure page
 st.set_page_config(
-    page_title="✨ Knowledge Quest ✨",
-    page_icon="✨",
+    page_title="Knowledge Quest",
+    page_icon="🎓",
     layout="centered",
     initial_sidebar_state="collapsed"
 )
 
+localS = LocalStorage()
 
 # Poe API Client
 class PoeAPIClient:
@@ -163,7 +182,7 @@ st.markdown("""
 @import url('https://fonts.googleapis.com/css2?family=Lato:wght@400;600;700;800;900&display=swap');
 
 /* ... [Rest of your CSS is unchanged and correct] ... */
-.main-title{font-family:'Lato',sans-serif;font-size:2.25rem;font-weight:900;text-align:center;margin-bottom:1.5rem;background:linear-gradient(135deg, #4F46E5, #3B82F6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}.quiz-container{font-family:'Lato',sans-serif;background:white;border-radius:16px;padding:30px;border:1px solid #D1D5DB;box-shadow:0 8px 25px rgba(0,0,0,0.05);margin:1rem 0;}.question-text{font-size:1.1rem;font-weight:600;margin-bottom:0.75rem;color:#111827;}.progress-container{background-color:#E5E7EB;border-radius:4px;height:8px;margin:1rem 0;}.progress-bar{background:linear-gradient(45deg, #4F46E5, #3B82F6);height:100%;border-radius:4px;transition:width 0.5s ease;}.api-status{background:linear-gradient(45deg, #EBF8FF, #DBEAFE);border:1px solid #3B82F6;border-radius:12px;padding:15px;margin:10px 0;}.demo-questions{background:#F0FDF4;border:1px solid #22C55E;border-radius:8px;padding:15px;margin:10px 0;}.badge{display:inline-block;margin:5px;padding:8px 16px;border-radius:20px;font-size:0.9rem;font-weight:600;}.perfect-badge{background:linear-gradient(45deg, #FBBF24, #F59E0B);color:#78350F;}.high-achiever-badge{background:linear-gradient(45deg, #10B981, #059669);color:white;}.explanation-box{padding:15px;border-radius:12px;border:1px solid #D1D5DB;margin-top:15px;}
+.main-title{font-family:'Lato',sans-serif;font-size:2.25rem;font-weight:900;text-align:center;margin-bottom:1.5rem;background:linear-gradient(135deg, #4F46E5, #3B82F6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}.quiz-container{font-family:'Lato',sans-serif;background:white;border-radius:16px;padding:30px;border:1px solid #D1D5DB;box-shadow:0 8px 25px rgba(0,0,0,0.05);margin:1rem 0;}.question-text{font-size:1.1rem;font-weight:600;margin-bottom:0.75rem;}.progress-container{background-color:#E5E7EB;border-radius:4px;height:8px;margin:1rem 0;}.progress-bar{background:linear-gradient(45deg, #4F46E5, #3B82F6);height:100%;border-radius:4px;transition:width 0.5s ease;}.api-status{background:linear-gradient(45deg, #EBF8FF, #DBEAFE);border:1px solid #3B82F6;border-radius:12px;padding:15px;margin:10px 0;}.demo-questions{background:#F0FDF4;border:1px solid #22C55E;border-radius:8px;padding:15px;margin:10px 0;}.badge{display:inline-block;margin:5px;padding:8px 16px;border-radius:20px;font-size:0.9rem;font-weight:600;}.perfect-badge{background:linear-gradient(45deg, #FBBF24, #F59E0B);color:#78350F;}.high-achiever-badge{background:linear-gradient(45deg, #10B981, #059669);color:white;}.explanation-box{padding:15px;border-radius:12px;border:1px solid #D1D5DB;margin-top:15px;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -176,7 +195,8 @@ def init_session_state():
         'quiz_finished': False, 'user_answers': {}, 'score_history': [],
         'revision_mode': False, 'revision_index': 0, 'audio_urls': {'questions': {}, 'answers': {}},
         'generating_questions': False, 'poe_client': None, 'show_ai_settings': False,
-        'audio_generated': False, 'is_redoing_wrong': False
+        'audio_generated': False, 'is_redoing_wrong': False, 'quiz_generation_in_progress': False,
+        'uploader_key': 0, 'confirm_clear_local': False, 'confirm_clear_cloud': False, 'char_limit': 30000
     }
     for key, default_value in defaults.items():
         if key not in st.session_state:
@@ -346,7 +366,7 @@ def validate_questions_array(data):
 
 
 def generate_ai_prompt(input_text, num_questions):
-    return f"""You are a teacher creating educational assessments. You are Usage from Chiikawa, the very cute crazy rabbit character. フフフ... Let's learn something new!
+    return f"""You are a teacher creating educational assessments. You are Usage from Chiikawa, the very cute crazy rabbit character. Let's learn something new!
 
 When questions are asked, you give constructive step by step hints to lead the student to get to the answer, before giving the direct answers but you make sure the student can get to the point at the end. The style of teaching is concise and get to the point, but keep it friendly. When giving compliments and acting like the character, you can use Japanese for non technical related sentence. When you are talking on technical items, please always use English.
 
@@ -359,13 +379,14 @@ You are a teacher creating educational assessments. Based on the following mater
 ---
 
 Based on these materials, do the following:
-1) Guess the educational level of the topic (e.g., primary P.2, secondary, tertiary, professional).
+1) Guess the educational level of the topic (e.g., primary P.2, secondary, tertiary, professional, postgraduate).
 2) Create {num_questions} multiple-choice questions whose difficulty is one level harder than the guessed level (e.g., guessed P.2 -> produce P.3-level difficulty or slightly higher). Make them slightly tricky but fair.
 3) For each question, write plausible distractors that are GENERALLY INCORRECT (not just wrong relative to this passage). Distractors should represent common misconceptions or confusable alternatives that would be wrong in most contexts.
 4) The "explanation" field should be concise and help memorization (shown after correct).
 5) The "hint" field must be present (can be short) and should guide reflection after a wrong attempt.
-6) Ensure no distractor is a case/spacing variant of the correct answer.
+6) Ensure no distractor is a case/spacing variant of the correct answer with similar length.
 7) Distractors must be substantively different from the correct answer
+8) Use the same language as of the materials given. Only when the materials is about language learning, supplement with English so user get understood everything even user cannot understand the language materials.
 
 
 Important formatting rules:
@@ -489,6 +510,22 @@ def generate_audio_for_questions():
 
 def start_quiz():
     input_text = st.session_state.get('question_input', '').strip()
+
+    # --- MODIFICATION START ---
+    # Define a character limit for the text to be processed by the AI.
+    CHAR_LIMIT = st.session_state.get('char_limit', 20000)
+
+    # Check if the input text exceeds the character limit.
+    if len(input_text) > CHAR_LIMIT:
+        # Show a non-blocking "pop-up" message to the user.
+        st.toast(
+            f"Input text exceeded {CHAR_LIMIT:,} characters and was truncated.",
+            icon="⚠️"
+        )
+        # Truncate the text before it's used for JSON parsing or AI generation.
+        input_text = input_text[:CHAR_LIMIT]
+    # --- MODIFICATION END ---
+
     print("input_text")
     if not input_text:
         st.error("Please paste some material or a question set to begin.")
@@ -520,6 +557,7 @@ def start_quiz():
         else:
             num_q = st.session_state.get('num_questions', 3)
             model = st.session_state.get('llm_model', 'GPT-5-mini')
+            # The (potentially truncated) 'input_text' is used here.
             questions = generate_questions_with_ai(input_text, num_q, model)
             if not questions:
                 st.error("Failed to generate questions. Using demo questions instead.")
@@ -841,10 +879,436 @@ def render_revision_mode():
         st.rerun()
 
 
+# --- TEXT COLLECTOR HELPER FUNCTIONS ---
+
+def tc_initialize_state():
+    """
+    Initializes session state from browser's local storage.
+    This function is designed to handle the asynchronous nature of fetching data
+    from the browser, which often requires more than one script run on initial load.
+    """
+    # 1. Fetch the item from local storage. It might be None on the first run after a refresh.
+    persisted_json = localS.getItem("all_texts")
+
+    if 'all_texts' not in st.session_state:
+        st.session_state.all_texts = json.loads(persisted_json) if persisted_json else {}
+        st.session_state.processed_files = set(st.session_state.all_texts.keys())
+
+    elif not st.session_state.all_texts and persisted_json:
+        st.session_state.all_texts = json.loads(persisted_json)
+        st.session_state.processed_files = set(st.session_state.all_texts.keys())
+
+
+
+def tc_save_data():
+    """Saves the collected texts to local storage."""
+    localS.setItem("all_texts", json.dumps(st.session_state.all_texts))
+
+
+def tc_extract_text_from_file(uploaded_file):
+    """Extracts text content from a supported file type."""
+    name, extension = os.path.splitext(uploaded_file.name)
+    extension = extension.lower()
+    if extension == ".pdf":
+        with fitz.open(stream=uploaded_file.getvalue(), filetype="pdf") as doc:
+            return "".join(page.get_text() for page in doc)
+    elif extension == ".docx":
+        doc = docx.Document(uploaded_file)
+        return "\n".join([para.text for para in doc.paragraphs])
+    elif extension in [".txt", ".md"]:
+        return uploaded_file.getvalue().decode("utf-8")
+    else:
+        st.error(f"Unsupported file type: {extension}")
+        return None
+
+
+@st.cache_data(ttl=60) # Cache for 1 minute to avoid hitting API rate limits
+def get_all_cloud_data():
+    """Reads the entire database (one JSON file) from JSONBin."""
+    try:
+        response = requests.get(f"{BASE_URL}/latest", headers=HEADERS)
+        # Raise an exception for bad status codes (4xx or 5xx)
+        response.raise_for_status()
+        # The actual data is nested under the "record" key
+        return response.json().get("record", {})
+    except requests.exceptions.HTTPError as e:
+        # A 404 error is expected if the bin is new or empty. Treat as empty data.
+        if e.response.status_code == 404:
+            return {}
+        st.error(f"Failed to read from JSONBin: {e}")
+        return None
+    except Exception as e:
+        st.error(f"An unexpected error occurred while fetching data: {e}")
+        return None
+
+
+def save_all_cloud_data(data):
+    """Saves the entire database (one JSON file) back to JSONBin."""
+    try:
+        response = requests.put(BASE_URL, json=data, headers=HEADERS)
+        response.raise_for_status()
+        # Clear the cache after a successful write to ensure the next read gets the fresh data
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"Failed to save data to JSONBin: {e}")
+        return False
+
+# --- MAIN TEXT COLLECTOR PAGE RENDER FUNCTION ---
+
+def render_text_collector_page():
+    """
+    Renders the full UI, with fixes for delete button layout, functionality,
+    and a new "Clear Cloud Data" feature.
+    """
+    tc_initialize_state()
+
+    if st.button("⬅️ Back to Knowledge Quest"):
+        st.session_state.page = 'main'
+        st.rerun()
+
+    st.title("📚 Text Collector")
+    st.markdown(
+        "Add documents from your device or paste text. If you enter a Resources ID, your sources will be automatically saved to the cloud."
+    )
+
+    # --- Cloud Storage Section ---
+    st.subheader("☁️ Cloud Storage")
+    # st.info("Enter a Resources ID to save/load your sources online.")
+    user_id = st.text_input("Enter a Resources ID to save/load your sources online.", key="user_id", placeholder="e.g., alex123")
+
+    if st.button("🔄 Load My Sources from Cloud"):
+        if user_id:
+            # ... (This section's logic is correct and remains the same)
+            all_cloud_data = get_all_cloud_data()
+            if all_cloud_data is not None:
+                user_sources = all_cloud_data.get(user_id, {})
+                if user_sources:
+                    st.session_state.all_texts.update(user_sources)
+                    st.session_state.processed_files.update(user_sources.keys())
+                    tc_save_data()
+                    st.success(f"Loaded {len(user_sources)} source(s) from the cloud for '{user_id}'.")
+                    st.rerun()
+                else:
+                    st.info("No sources found in the cloud for this User ID.")
+        else:
+            st.warning("Please enter a User ID to load data from the cloud.")
+
+    st.divider()
+
+    col1, col2 = st.columns([1, 1.3])
+
+    # --- Column 1: Add New Source ---
+    with col1:
+        st.header("1. Add New Source")
+        tab1, tab2 = st.tabs(["📄 Upload File(s)", "📋 Paste Text"])
+
+        def handle_file_upload(uploader_key):
+            """
+            Processes uploaded files concurrently. Waits for ALL files to be processed
+            before updating the state and UI in a single batch.
+            """
+            if uploader_key in st.session_state and st.session_state[uploader_key]:
+
+                uploaded_files = st.session_state[uploader_key]
+
+                files_to_process = [
+                    file for file in uploaded_files
+                    if file.name not in st.session_state.processed_files
+                ]
+
+                if not files_to_process:
+                    # Handle case where no new files were uploaded
+                    st.info("No new files to process.")
+                    # We still increment the key to reset the uploader widget
+                    st.session_state['uploader_key'] += 1
+                    return
+
+                # --- MODIFICATION START: Wait for all results before updating ---
+
+                # These will temporarily hold the results before we commit them to session state.
+                success_results = {}
+                failed_files = {}
+                processed_file_names = set()
+
+                with st.spinner(f"Processing {len(files_to_process)} new file(s)... This may take a moment."):
+                    future_to_file = {}
+                    with ThreadPoolExecutor(max_workers=5) as executor:
+                        # 1. Submit all file processing tasks to the thread pool.
+                        for file in files_to_process:
+                            future = executor.submit(tc_extract_text_from_file, file)
+                            future_to_file[future] = file
+
+                        # 2. NEW: Wait for all futures to complete and gather results.
+                        # We iterate through the original dictionary. The .result() call will
+                        # block until that specific future is complete.
+                        for future, file in future_to_file.items():
+                            try:
+                                content = future.result()  # This waits for the result
+                                if content is not None:
+                                    success_results[file.name] = content
+                            except Exception as e:
+                                failed_files[file.name] = str(e)
+                            finally:
+                                # We always add the file to the processed set
+                                processed_file_names.add(file.name)
+
+                # --- BATCH UPDATE: Now that all files are processed, update session state and UI in one go. ---
+
+                newly_added_names = list(success_results.keys())
+
+                if newly_added_names:
+                    # Update session state with all successful results at once
+                    st.session_state.all_texts.update(success_results)
+                    st.session_state.processed_files.update(processed_file_names)
+
+                    tc_save_data()  # Save all new data locally
+
+                    # Show one consolidated success message
+                    st.success(f"Successfully processed and added {len(newly_added_names)} file(s) in one batch.")
+
+                    if user_id:
+                        with st.spinner(f"Saving {len(newly_added_names)} file(s) to the cloud..."):
+                            all_cloud_data = get_all_cloud_data()
+                            if all_cloud_data is not None:
+                                if user_id not in all_cloud_data:
+                                    all_cloud_data[user_id] = {}
+
+                                # Update cloud data object with all new results
+                                all_cloud_data[user_id].update(success_results)
+
+                                if save_all_cloud_data(all_cloud_data):
+                                    st.success(
+                                        f"Successfully saved {len(newly_added_names)} new file(s) to the cloud for '{user_id}'.")
+
+                # If there were only failures and no successes, we still need to update the processed set
+                elif not newly_added_names and processed_file_names:
+                    st.session_state.processed_files.update(processed_file_names)
+
+                if failed_files:
+                    for name, error_msg in failed_files.items():
+                        st.error(f"Error processing '{name}': {error_msg}")
+
+                # --- MODIFICATION END ---
+
+                # This part remains the same: increment the key to reset the uploader.
+                st.session_state['uploader_key'] += 1
+
+        with tab1:
+            # First, we determine the key that will be used for this render.
+            current_uploader_key = f"file_uploader_{st.session_state['uploader_key']}"
+
+            # We use the dynamic key and pass it as a keyword argument to the callback.
+            st.file_uploader("Select files", type=["pdf", "docx", "txt", "md"],
+                             accept_multiple_files=True,
+                             key=current_uploader_key,  # <--- Use the dynamic key
+                             on_change=handle_file_upload,
+                             # Use kwargs to pass the current key to the callback function.
+                             kwargs={'uploader_key': current_uploader_key}  # <--- CRUCIAL CHANGE
+                             )
+        with tab2:
+            with st.form("paste_form", clear_on_submit=True):
+                source_name = st.text_input("Source Name", placeholder="e.g., 'My Chapter Notes'")
+                pasted_text = st.text_area("Paste Text", height=150)
+                if st.form_submit_button("Save Pasted Text"):
+                    if source_name and pasted_text and source_name not in st.session_state.all_texts:
+                        st.session_state.all_texts[source_name] = pasted_text
+                        tc_save_data()
+                        st.success(f"Added locally: **{source_name}**")
+                        if user_id:
+                            with st.spinner("Saving to cloud..."):
+                                all_cloud_data = get_all_cloud_data()
+                                if all_cloud_data is not None:
+                                    all_cloud_data[user_id] = st.session_state.all_texts
+
+                                    if save_all_cloud_data(all_cloud_data):
+                                        st.success(f"Successfully saved '{source_name}' to the cloud.")
+                        st.rerun()
+                    elif source_name in st.session_state.all_texts:
+                        st.warning("A source with this name already exists.")
+                    else:
+                        st.warning("Please provide both a unique source name and text content.")
+
+        st.markdown("---")
+
+        bcol1, bcol2 = st.columns(2)
+        if st.session_state.get('confirm_clear_local', False):
+            # If so, show a warning and the final confirmation/cancel buttons
+            st.warning("**Are you sure?** This will permanently delete all local data.")
+
+            # Use new columns for the confirmation buttons
+            confirm_col1, cancel_col1 = bcol1.columns(2)
+
+            if confirm_col1.button("✅ Yes, Clear Local", use_container_width=True, key="confirm_local_yes"):
+                # Perform the original deletion action
+                st.session_state.all_texts = {}
+                st.session_state.processed_files = set()
+                tc_save_data()
+
+                # Reset the confirmation state and rerun the app for a clean refresh
+                st.session_state.confirm_clear_local = False
+                st.success("Local data has been cleared.")
+                st.components.v1.html("<script>window.location.reload();</script>", height=0, width=0)
+
+            if cancel_col1.button("❌ No, Cancel", use_container_width=True, key="confirm_local_no"):
+                # Simply reset the confirmation state and rerun to go back to normal
+                st.session_state.confirm_clear_local = False
+                st.rerun()
+        else:
+            # If confirmation is not active, show the original button
+            if bcol1.button("🗑️ Clear All Local Data", use_container_width=True):
+                # On click, set the confirmation state to True and rerun to show the warning
+                st.session_state.confirm_clear_local = True
+                st.rerun()
+        # if bcol1.button("🗑️ Clear All Local Data", use_container_width=True):
+        #     st.session_state.all_texts = {}
+        #     st.session_state.processed_files = set()
+        #     tc_save_data()
+        #     st.components.v1.html("<script>window.location.reload();</script>", height=0, width=0)
+        if st.session_state.get('confirm_clear_cloud', False):
+            # If so, show a warning and the final confirmation/cancel buttons
+            st.warning(f"**Are you sure?** This will permanently delete all cloud data for '{user_id}'.")
+
+            # Use new columns for the confirmation buttons
+            confirm_col2, cancel_col2 = bcol2.columns(2)
+
+            if confirm_col2.button("✅ Yes, Clear Cloud", use_container_width=True, key="confirm_cloud_yes"):
+                # Perform the original deletion action
+                with st.spinner(f"Clearing all cloud data for user '{user_id}'..."):
+                    all_cloud_data = get_all_cloud_data()
+                    if all_cloud_data is not None and user_id in all_cloud_data:
+                        all_cloud_data[user_id] = {}
+                        if save_all_cloud_data(all_cloud_data):
+                            st.session_state.all_texts = {}
+                            st.session_state.processed_files = set()
+                            tc_save_data()
+                            st.components.v1.html("<script>window.location.reload();</script>", height=0, width=0)
+                            st.success(f"Successfully cleared all cloud data for '{user_id}'.")
+                        else:
+                            st.error("Failed to clear cloud data.")
+                    else:
+                        st.warning("No cloud data found for this user to clear.")
+
+                # Reset the confirmation state and rerun the app
+                st.session_state.confirm_clear_cloud = False
+                st.rerun()
+
+            if cancel_col2.button("❌ No, Cancel", use_container_width=True, key="confirm_cloud_no"):
+                # Simply reset the confirmation state and rerun
+                st.session_state.confirm_clear_cloud = False
+                st.rerun()
+        else:
+            # If confirmation is not active, show the original button
+            if bcol2.button("☁️ Clear My Cloud Data", use_container_width=True, disabled=not user_id):
+                # On click, set the confirmation state to True and rerun
+                st.session_state.confirm_clear_cloud = True
+                st.rerun()
+        # if bcol2.button("☁️ Clear My Cloud Data", use_container_width=True, disabled=not user_id):
+        #     with st.spinner(f"Clearing all cloud data for user '{user_id}'..."):
+        #         all_cloud_data = get_all_cloud_data()
+        #         if all_cloud_data is not None and user_id in all_cloud_data:
+        #             all_cloud_data[user_id] = {}
+        #             if save_all_cloud_data(all_cloud_data):
+        #                 st.success(f"Successfully cleared all cloud data for '{user_id}'.")
+        #                 st.session_state.all_texts = {}
+        #                 st.session_state.processed_files = set()
+        #                 tc_save_data()
+        #                 st.components.v1.html("<script>window.location.reload();</script>", height=0, width=0)
+        #             else:
+        #                 st.error("Failed to clear cloud data.")
+        #         else:
+        #             st.warning("No cloud data found for this user to clear.")
+
+    # --- Column 2: Combine and Use Text ---
+    with col2:
+        st.header("2. Combine & Use Text")
+        if not st.session_state.all_texts:
+            st.info("No sources saved. Upload a file or load from the cloud to begin.")
+        else:
+            all_doc_names = sorted(list(st.session_state.all_texts.keys()))
+            selected_docs = st.multiselect("Choose sources to combine:", options=all_doc_names, key="doc_multiselect")
+            if selected_docs and user_id:
+                if st.button(f"⬆️ Sync {len(selected_docs)} Selected Source(s) to Cloud", use_container_width=True):
+                    all_cloud_data = get_all_cloud_data()
+                    if all_cloud_data is not None:
+                        if user_id not in all_cloud_data: all_cloud_data[user_id] = {}
+                        for doc_name in selected_docs:
+                            all_cloud_data[user_id][doc_name] = st.session_state.all_texts[doc_name]
+                        if save_all_cloud_data(all_cloud_data):
+                            st.success(f"Successfully synced {len(selected_docs)} source(s) to the cloud.")
+            if selected_docs:
+                content_blocks = [f"--- Content of: {doc} ---\n\n{st.session_state.all_texts[doc]}" for doc in
+                                  selected_docs]
+                appended_text = "\n\n".join(content_blocks)
+                st.text_area(f"Combined Content ({len(selected_docs)} Sources)", appended_text, height=250,
+                             key="combined_text_area")
+
+                def use_text_for_quiz_and_switch_view():
+                    st.session_state.text_to_inject = st.session_state.combined_text_area
+                    st.session_state.page = 'main'
+
+                st.button("🚀 Use this Text for Quiz & Return Home", type="primary",
+                          on_click=use_text_for_quiz_and_switch_view, use_container_width=True)
+
+            st.markdown("---")
+            st.subheader("Manage Saved Sources")
+
+            for doc_name in list(st.session_state.all_texts.keys()):
+                c1, c2, c3 = st.columns([0.6, 0.2, 0.2])
+                c1.text(doc_name)
+
+                if c2.button("🗑️ Local", key=f"delete_local_{doc_name}", help="Delete from this browser's storage",
+                             use_container_width=True):
+                    del st.session_state.all_texts[doc_name]
+                    st.session_state.processed_files.discard(doc_name)
+                    tc_save_data()
+                    st.rerun()
+
+                if c3.button("☁️ Cloud", key=f"delete_cloud_{doc_name}", help="Delete from your online cloud storage",
+                             use_container_width=True):
+                    if user_id:
+                        with st.spinner(f"Deleting '{doc_name}' from cloud..."):
+                            all_cloud_data = get_all_cloud_data()
+                            if all_cloud_data is not None and user_id in all_cloud_data and doc_name in all_cloud_data[
+                                user_id]:
+                                del all_cloud_data[user_id][doc_name]
+                                cloud_delete_successful = save_all_cloud_data(all_cloud_data)
+
+                                if cloud_delete_successful:
+                                    st.success(f"Deleted '{doc_name}' from the cloud.")
+                                    if doc_name in st.session_state.all_texts:
+                                        del st.session_state.all_texts[doc_name]
+                                    st.rerun()
+                                else:
+                                    st.error(f"Failed to delete '{doc_name}' from the cloud.")
+                            else:
+                                st.warning(f"'{doc_name}' not found in the cloud for this user. Deleting locally.")
+                                if doc_name in st.session_state.all_texts:
+                                    del st.session_state.all_texts[doc_name]
+                                st.rerun()
+                    else:
+                        st.warning("Please enter a User ID to manage cloud sources.")
+
 # Main app
 def main():
     init_session_state()
     init_poe_client()
+
+    # We default to the 'main' quiz page.
+    if 'page' not in st.session_state:
+        st.session_state.page = 'main'
+
+    # If the state is 'text_collector', render that page and stop.
+    if st.session_state.page == 'text_collector':
+        render_text_collector_page()
+        return  # This stops the rest of the main function from running
+
+    # --- Main Quiz App Logic (runs if page is not 'text_collector') ---
+
+    # Inject text from the collector if it exists
+    if 'text_to_inject' in st.session_state and st.session_state.text_to_inject:
+        st.session_state.question_input = st.session_state.text_to_inject
+        del st.session_state.text_to_inject
 
     if st.session_state.get('revision_mode'):
         render_revision_mode()
@@ -853,6 +1317,10 @@ def main():
     elif st.session_state.get('quiz_started'):
         render_quiz_question()
     else:
+        def set_quiz_generation_status():
+            st.session_state.quiz_generation_in_progress = True
+        def reset_quiz_generation_status():
+            st.session_state.quiz_generation_in_progress = False
         # Setup page
         st.markdown("<div class='main-title'>✨ Knowledge Quest ✨</div>", unsafe_allow_html=True)
 
@@ -862,6 +1330,24 @@ def main():
             placeholder="Paste any text for AI-generated questions, or paste a valid JSON array of questions.",
             height=200, key="question_input", on_change=check_input_and_show_ai_settings
         )
+        char_count = len(st.session_state.get("question_input", ""))
+        MAX_CHAR_LIMIT = st.session_state.get("char_limit", 20000)
+        # Display the character counter. st.caption is ideal for small helper text.
+
+
+        # Display a warning if the character count exceeds the limit.
+        if char_count > MAX_CHAR_LIMIT:
+            st.caption(f"{char_count} / {MAX_CHAR_LIMIT} characters")
+            st.warning(
+                f"Warning: Your text exceeds the {MAX_CHAR_LIMIT} character limit. "
+                f"First {MAX_CHAR_LIMIT} characters is used for processing."
+            )
+
+
+        def go_to_text_collector():
+            st.session_state.page = 'text_collector'
+
+        st.button("Or, Extract Text from Documents", icon="📚", on_click=go_to_text_collector)
 
         # show_ai_panel = st.session_state.get('show_ai_settings', False)
         # if show_ai_panel:
@@ -871,8 +1357,10 @@ def main():
                                        "Gemini-2.5-Pro",
                                        # "GPT-5",
                                        "GPT-5-mini"],
-                         key="llm_model")
-            c2.number_input("Number of Questions:", min_value=1, max_value=20, value=3, key="num_questions")
+                         key="llm_model",
+                         on_change=reset_quiz_generation_status)
+            c2.number_input("Number of Questions:", min_value=1, max_value=20, value=3, key="num_questions", on_change=reset_quiz_generation_status)
+
 
         st.session_state.quiz_mode = 'Silent Mode'
         # with st.expander("⚙️ Quiz Settings"):
@@ -882,7 +1370,11 @@ def main():
         #         st.checkbox("Speak question audio", value=True, key="speak_question")
         #         st.checkbox("Speak correct answer audio", value=True, key="speak_answer")
 
-        if st.button("🚀 Start Quiz", type="primary", use_container_width=True):
+        if st.button("🚀 Start Quiz",
+                     type="primary",
+                     use_container_width=True,
+                     on_click=set_quiz_generation_status,
+                     disabled=st.session_state.get('quiz_generation_in_progress', False)):
             start_quiz()
 
 
