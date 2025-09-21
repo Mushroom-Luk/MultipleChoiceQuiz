@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from streamlit_local_storage import LocalStorage
 import fitz
 import docx
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
 try:
     API_KEY = st.secrets["jsonbin"]["api_key"]

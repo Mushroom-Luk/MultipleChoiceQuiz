@@ -1,7 +1,7 @@
 streamlit
 openai
-streamlit_local_storage
-frontend
+streamlit
+requests
+streamlit-local-storage
 PyMuPDF
-json
 python-docx
