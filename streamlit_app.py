@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from streamlit_local_storage import LocalStorage
 import fitz
 import docx
+import pptx
 from concurrent.futures import ThreadPoolExecutor
 
 try:
@@ -915,6 +916,60 @@ def tc_extract_text_from_file(uploaded_file):
     elif extension == ".docx":
         doc = docx.Document(uploaded_file)
         return "\n".join([para.text for para in doc.paragraphs])
+    elif extension == ".pptx":
+        """
+        Extracts text from a .pptx file.
+        This will extract text from all shapes on each slide.
+        """
+        try:
+            prs = pptx.Presentation(uploaded_file)
+            text_runs = []
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if not shape.has_text_frame:
+                        continue
+                    for paragraph in shape.text_frame.paragraphs:
+                        for run in paragraph.runs:
+                            text_runs.append(run.text)
+            return "\n".join(text_runs)
+        except Exception as e:
+            st.error(f"Error processing PPTX file: {e}")
+            return None
+    elif extension == ".csv":
+        """
+        Extracts text from a .csv file.
+        Converts rows and columns into a single block of text.
+        """
+        try:
+            # Read the file content and decode it
+            content = uploaded_file.getvalue().decode("utf-8")
+            # Use io.StringIO to allow the csv module to read a string
+            file_like_object = io.StringIO(content)
+            reader = csv.reader(file_like_object)
+            # Join cells with a space, and rows with a newline
+            return "\n".join([" ".join(row) for row in reader])
+        except Exception as e:
+            st.error(f"Error processing CSV file: {e}")
+            return None
+
+    elif extension == ".json":
+        """
+        Extracts and formats text from a .json file.
+        This will "pretty-print" the JSON for readability.
+        """
+        try:
+            # Read the file content and decode it
+            content = uploaded_file.getvalue().decode("utf-8")
+            # Parse the JSON data
+            data = json.loads(content)
+            # Convert it back to a formatted string with indentation
+            return json.dumps(data, indent=4)
+        except json.JSONDecodeError:
+            st.error("Error: The uploaded JSON file is not correctly formatted.")
+            return None
+        except Exception as e:
+            st.error(f"Error processing JSON file: {e}")
+            return None
     elif extension in [".txt", ".md"]:
         return uploaded_file.getvalue().decode("utf-8")
     else:
@@ -977,7 +1032,7 @@ def render_text_collector_page():
     # st.info("Enter a Resources ID to save/load your sources online.")
     user_id = st.text_input("Enter a Resources ID to save/load your sources online.", key="user_id", placeholder="e.g., alex123")
 
-    if st.button("🔄 Load My Sources from Cloud"):
+    if st.button("🔄 Load My Sources from Cloud", disabled=not user_id):
         if user_id:
             # ... (This section's logic is correct and remains the same)
             all_cloud_data = get_all_cloud_data()
@@ -1099,7 +1154,7 @@ def render_text_collector_page():
             current_uploader_key = f"file_uploader_{st.session_state['uploader_key']}"
 
             # We use the dynamic key and pass it as a keyword argument to the callback.
-            st.file_uploader("Select files", type=["pdf", "docx", "txt", "md"],
+            st.file_uploader("Upload Documents \n\n (PDF, DOCX, PPTX, TXT, CSV, JSON, MD)", type=["pdf", "docx", "pptx", "txt", "csv", "json", "md"],
                              accept_multiple_files=True,
                              key=current_uploader_key,  # <--- Use the dynamic key
                              on_change=handle_file_upload,
@@ -1149,6 +1204,7 @@ def render_text_collector_page():
                 st.session_state.confirm_clear_local = False
                 st.success("Local data has been cleared.")
                 st.components.v1.html("<script>window.location.reload();</script>", height=0, width=0)
+                st.rerun()
 
             if cancel_col1.button("❌ No, Cancel", use_container_width=True, key="confirm_local_no"):
                 # Simply reset the confirmation state and rerun to go back to normal
@@ -1183,6 +1239,7 @@ def render_text_collector_page():
                             st.session_state.processed_files = set()
                             tc_save_data()
                             st.components.v1.html("<script>window.location.reload();</script>", height=0, width=0)
+                            st.rerun()
                             st.success(f"Successfully cleared all cloud data for '{user_id}'.")
                         else:
                             st.error("Failed to clear cloud data.")
@@ -1265,7 +1322,7 @@ def render_text_collector_page():
                     st.rerun()
 
                 if c3.button("☁️ Cloud", key=f"delete_cloud_{doc_name}", help="Delete from your online cloud storage",
-                             use_container_width=True):
+                             use_container_width=True, disabled=not user_id):
                     if user_id:
                         with st.spinner(f"Deleting '{doc_name}' from cloud..."):
                             all_cloud_data = get_all_cloud_data()
@@ -1351,7 +1408,7 @@ def main():
 
         # show_ai_panel = st.session_state.get('show_ai_settings', False)
         # if show_ai_panel:
-        with st.expander("🤖 AI Generation Settings", expanded=False):
+        with st.expander("🤖 AI Generation Settings", expanded=True):
             c1, c2 = st.columns(2)
             c1.selectbox("AI Model:", ["Gemini-2.5-Flash",
                                        "Gemini-2.5-Pro",

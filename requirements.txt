@@ -5,3 +5,4 @@ requests
 streamlit-local-storage
 PyMuPDF
 python-docx
+python-pptx
