@@ -1420,6 +1420,7 @@ def main():
         with st.expander("🤖 AI Generation Settings", expanded=True):
             c1, c2 = st.columns(2)
             c1.selectbox("AI Model:", ["Gemini-2.5-Flash",
+                                       'Grok-4-Fast-Reasoning',
                                        "Gemini-2.5-Pro",
                                        # "GPT-5",
                                        "GPT-5-mini"],
