@@ -70,7 +70,7 @@ class PoeAPIClient:
         self.api_key = api_key
         self.base_url = "https://api.poe.com/v1"
 
-    def generate_questions(self, prompt, model="Gemini-2.5-Flash"):
+    def generate_questions(self, prompt, model="Gemini-3-Flash"):
         """Generate questions using Poe API"""
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -414,7 +414,7 @@ Based on these materials, do the following:
 6) Ensure no distractor is a case/spacing variant of the correct answer with similar length.
 7) Distractors must be substantively different from the correct answer
 8) Use the same language as of the materials given. Only when the materials is about language learning, supplement with English so user get understood everything even user cannot understand the language materials.
-
+9) Note markdowns or codes or mathematical formulas are not rendered on the question (but rendered in options), so the question must be readable in plain text
 
 Important formatting rules:
 - Output ONLY pure JSON. No thoughts. No preface. No prose, no markdown, no code fences.
@@ -1419,9 +1419,9 @@ def main():
         # if show_ai_panel:
         with st.expander("🤖 AI Generation Settings", expanded=True):
             c1, c2 = st.columns(2)
-            c1.selectbox("AI Model:", ["Gemini-2.5-Flash",
-                                       'Grok-4-Fast-Reasoning',
-                                       "Gemini-2.5-Pro",
+            c1.selectbox("AI Model:", ["Gemini-3-Flash",
+                                       'Grok-4.1-Fast-Reasoning',
+                                       # "Gemini-2.5-Pro",
                                        # "GPT-5",
                                        "GPT-5-mini"],
                          key="llm_model",
